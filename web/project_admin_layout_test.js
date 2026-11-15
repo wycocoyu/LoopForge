@@ -68,7 +68,7 @@ const ctx = {
 };
 ctx.document={activeElement:null,contains:()=>false};
 vm.createContext(ctx);
-for (const name of ["parseGongfengRepoURL","repoDisplayPath","repoProviderLabel"]) vm.runInContext(extract(fs.readFileSync(issuesPath,"utf8"),name),ctx);
+for (const name of ["parseGongfengRepoURL","parseCNBRepoURL","repoDisplayPath","repoProviderLabel"]) vm.runInContext(extract(fs.readFileSync(issuesPath,"utf8"),name),ctx);
 vm.runInContext(fs.readFileSync(projectsPath,"utf8"),ctx);
 vm.runInContext(fs.readFileSync(drawerPath,"utf8"),ctx);
 vm.runInContext("projectAdminFail=(form,name,message)=>{globalThis.__fail={name,message};return false}",ctx);
@@ -150,7 +150,7 @@ assert.match(list,/pa-rc-add/);
 const empty=ctx.projectRepoListHTML([],"");
 assert.match(empty,/还没有绑定代码仓库/);
 assert.equal((empty.match(/<li>/g)||[]).length,3);
-assert.match(empty,/粘贴 GitHub 链接或 Git SSH 地址[^]*确认分支[^]*保存即生效/);
+assert.match(empty,/粘贴 GitHub、CNB 链接或 Git SSH 地址[^]*确认分支[^]*保存即生效/);
 assert.match(empty,/添加第一个仓库/);
 
 // Detail panels.

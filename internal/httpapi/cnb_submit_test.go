@@ -126,7 +126,7 @@ func TestWorkspaceSubmitMRRequiresACNBTokenForCNBRepositories(t *testing.T) {
 	if _, err := h.workspaceSubmitMR(context.Background(), session, map[string]any{"title": "x"}); err == nil || !strings.Contains(err.Error(), "CNB 访问令牌") || !strings.Contains(err.Error(), "cnb.cool/profile/token") {
 		t.Fatalf("a GitHub token must not stand in for the CNB token: %v", err)
 	}
-	if err := st.SetCNBToken(user.ID, testCNBToken); err != nil {
+	if err := setCNBToken(st, user.ID, testCNBToken); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.workspaceSubmitMR(context.Background(), session, map[string]any{"title": "x"}); err == nil || !strings.Contains(err.Error(), "执行引擎不可用") {
