@@ -753,7 +753,7 @@ func (d *Daemon) executeTerminal(ctx context.Context, task domain.RunnerTask) ex
 		}
 		command = runtime.WithCommandEnvironment(command, env)
 		command.Argv = runtime.BindMCPCallArgv(sandbox, command.Argv)
-		gitEnv, err := runtime.GitEnvironment(sandbox, workspace, invocationGitToken(task.Invocation))
+		gitEnv, err := runtime.GitEnvironment(sandbox, workspace, invocationGitToken(task.Invocation), invocationHTTPSCredentials(task.Invocation))
 		if err != nil {
 			return execResult{status: domain.RunnerTaskFailed, errMsg: fmt.Sprintf("prepare git credentials: %v", err)}
 		}
@@ -888,7 +888,7 @@ func (d *Daemon) executeInvocation(ctx context.Context, task domain.RunnerTask) 
 		commandEnv[key] = value
 	}
 	if slices.Contains(prepared.Command.CredentialBindings, runtime.BindGit) {
-		gitEnv, gitErr := runtime.GitEnvironment(sandbox, workspace, invocationGitToken(inv))
+		gitEnv, gitErr := runtime.GitEnvironment(sandbox, workspace, invocationGitToken(inv), invocationHTTPSCredentials(inv))
 		if gitErr != nil {
 			return execResult{status: domain.RunnerTaskFailed, errMsg: fmt.Sprintf("prepare git credentials: %v", gitErr)}, nil
 		}
@@ -1083,6 +1083,16 @@ func bindInvocationCredentials(inv *domain.RunnerInvocation, bindings []runtime.
 	return argv, env, nil
 }
 
+// invocationHTTPSCredentials are the host-scoped credentials the platform
+// resolved for this invocation.
+func invocationHTTPSCredentials(inv *domain.RunnerInvocation) []gitwork.HTTPSCredential {
+	return runtime.GitHTTPSFromWire(inv.GitHTTPSCredentials)
+}
+
+func withInvocationGit(ctx context.Context, inv *domain.RunnerInvocation) context.Context {
+	return gitwork.WithHTTPSCredentials(gitwork.WithSSHKeys(ctx, inv.GitSSHKeys), invocationHTTPSCredentials(inv))
+}
+
 // invocationGitToken is the token child processes use for git remotes; every
 // repository of one run carries the same responsible user's token.
 func invocationGitToken(inv *domain.RunnerInvocation) string {
@@ -1109,7 +1119,7 @@ func checkoutInvocationRepositories(ctx context.Context, workspace string, inv *
 	if inv == nil {
 		return nil
 	}
-	ctx = gitwork.WithSSHKeys(ctx, inv.GitSSHKeys)
+	ctx = withInvocationGit(ctx, inv)
 	repos := invocationRepositories(inv)
 	for i := range repos {
 		repo := repos[i]
@@ -1385,7 +1395,7 @@ func (d *Daemon) defaultWorkspace(taskID string) string {
 }
 
 // runnerVersion is reported at registration; it matches the module build.
-var runnerVersion = "0.10.1"
+var runnerVersion = "0.10.2"
 
 // Version returns the runner build version reported at registration.
 func Version() string { return runnerVersion }

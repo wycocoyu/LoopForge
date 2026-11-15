@@ -225,6 +225,7 @@ func (e *Engine) resolveRunCredentials(run domain.Run) runtime.RunCredentials {
 		GitToken:  resolveGitToken(e.repo, userID),
 	}
 	credentials.GitSSHKeys = e.repo.GitSSHKeysForRemotes(userID, sshRepositoryURLs(run.RepositoryContexts()))
+	credentials.GitHTTPS = e.repo.GitHTTPSCredentials(userID)
 	identity := resolveGitIdentity(e.repo, userID)
 	credentials.GitUserName = identity.name
 	credentials.GitUserEmail = identity.email
