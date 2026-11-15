@@ -100,95 +100,67 @@ type githubPull struct {
 // flag is enough because list responses may omit "merged".
 func (p githubPull) merged() bool { return p.Merged || p.MergedAt != nil }
 
-// ref is the "#N" reference returned to delivery callers.
-func (p githubPull) ref() string { return "#" + strconv.Itoa(p.Number) }
-
-func (p githubPull) delivery(project string) domain.DeliveryMR {
-	state := "opened"
+func (p githubPull) hosted() hostedPull {
+	h := hostedPull{Number: p.Number, State: "opened", TargetBranch: p.Base.Ref, HeadSHA: p.Head.SHA}
 	if p.merged() {
-		state = "merged"
+		h.State = "merged"
+		if p.MergedAt != nil {
+			h.MergedAt = p.MergedAt.UTC()
+		}
 	} else if p.State == "closed" {
-		state = "closed"
+		h.State = "closed"
 	}
-	return domain.DeliveryMR{Project: project, IID: p.Number, URL: domain.GongfengMRURL(project, p.Number), State: state, GongfengState: state, TargetBranch: p.Base.Ref}
+	return h
 }
 
-// mergedAt is GitHub's merged_at, never the poll time; zero until merged.
-func (p githubPull) mergedAt() time.Time {
-	if p.MergedAt == nil {
-		return time.Time{}
-	}
-	return p.MergedAt.UTC()
-}
+func (p githubPull) ref() string { return p.hosted().ref() }
 
-func (g *githubClient) findPull(branch, target string) (githubPull, bool, error) {
+func (p githubPull) delivery(project string) domain.DeliveryMR { return p.hosted().delivery(project) }
+
+func (g *githubClient) findPull(branch, target string) (hostedPull, bool, error) {
 	q := url.Values{"state": {"all"}, "head": {strings.Split(g.path, "/")[0] + ":" + branch}, "per_page": {"100"}, "sort": {"updated"}, "direction": {"desc"}}
 	if target != "" {
 		q.Set("base", target)
 	}
 	var list []githubPull
 	if err := g.request("GET", "/pulls?"+q.Encode(), nil, &list); err != nil {
-		return githubPull{}, false, err
+		return hostedPull{}, false, err
 	}
 	for _, p := range list {
 		if p.Head.Ref == branch && (target == "" || p.Base.Ref == target) {
-			return p, true, nil
+			return p.hosted(), true, nil
 		}
 	}
-	return githubPull{}, false, nil
+	return hostedPull{}, false, nil
 }
 
-func (s *Service) githubFindBranch(project, branch string) (domain.DeliveryMR, bool, error) {
-	g, err := s.githubClient(project)
-	if err != nil {
-		return domain.DeliveryMR{}, false, err
+func (g *githubClient) createPull(branch, target, title, body string) (hostedPull, error) {
+	var p githubPull
+	if err := g.request("POST", "/pulls", map[string]any{"head": branch, "base": target, "title": title, "body": body}, &p); err != nil {
+		return hostedPull{}, err
 	}
-	p, ok, err := g.findPull(branch, "")
-	if err != nil || !ok {
-		return domain.DeliveryMR{}, ok, err
-	}
-	return p.delivery(project), true, nil
+	return p.hosted(), nil
 }
 
-func (s *Service) githubMergeBranch(project, branch, target, title, description string) (string, error) {
-	if branch == "" {
-		return "", fmt.Errorf("source branch is required")
-	}
-	if branch == target {
-		return "", nil
-	}
-	g, err := s.githubClient(project)
-	if err != nil {
-		return "", err
-	}
-	p, found, err := g.findPull(branch, target)
-	if err != nil {
-		return "", err
-	}
-	if found && p.merged() {
-		return p.ref(), nil
-	}
-	if !found || p.State == "closed" {
-		if target == "" {
-			return "", ErrNoOpenMR
-		}
-		if title == "" {
-			title = "LoopForge: " + branch + " → " + target
-		}
-		if err := g.request("POST", "/pulls", map[string]any{"head": branch, "base": target, "title": title, "body": description}, &p); err != nil {
-			return "", err
-		}
-	}
+func (g *githubClient) mergePull(p hostedPull) error {
 	var result struct {
 		Merged bool `json:"merged"`
 	}
-	if err := g.request("PUT", "/pulls/"+strconv.Itoa(p.Number)+"/merge", map[string]any{"merge_method": "merge", "sha": p.Head.SHA}, &result); err != nil {
-		return "", err
+	if err := g.request("PUT", "/pulls/"+strconv.Itoa(p.Number)+"/merge", map[string]any{"merge_method": "merge", "sha": p.HeadSHA}, &result); err != nil {
+		return err
 	}
 	if !result.Merged {
-		return "", fmt.Errorf("GitHub did not merge pull request #%d", p.Number)
+		return fmt.Errorf("GitHub did not merge pull request #%d", p.Number)
 	}
-	return p.ref(), nil
+	return nil
+}
+
+func (g *githubClient) pull(number int) (hostedPull, error) {
+	var p githubPull
+	if err := g.request("GET", "/pulls/"+strconv.Itoa(number), nil, &p); err != nil {
+		return hostedPull{}, err
+	}
+	return p.hosted(), nil
 }
 
 func (s *Service) pullGitHubIssues(store IssueStoreAdapter, repo domain.Repository) (int, error) {
@@ -243,16 +215,3 @@ func (s *Service) pullGitHubIssues(store IssueStoreAdapter, repo domain.Reposito
 }
 
 func githubBodyHash(body string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(body))) }
-
-func (s *Service) refreshGitHubDelivery(store MRDeliveryStore, project string, number int) error {
-	g, err := s.githubClient(project)
-	if err != nil {
-		return err
-	}
-	var p githubPull
-	if err := g.request("GET", "/pulls/"+strconv.Itoa(number), nil, &p); err != nil {
-		return err
-	}
-	d := p.delivery(project)
-	return store.UpdateMRDeliveryState(project, number, d.GongfengState, d.TargetBranch, p.mergedAt(), time.Now().UTC())
-}
