@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"agentflow/internal/cnb"
 	"agentflow/internal/domain"
 	"agentflow/internal/gitwork"
 )
@@ -62,7 +63,7 @@ type workspaceMRResult struct {
 func workspaceSubmitMRDescriptor() agentToolDescriptor {
 	return agentToolDescriptor{
 		Name:        "workbench_workspace_submit_mr",
-		Description: "提交并推送当前工作区的工作分支。GitHub / 工蜂使用请求人的 Git Token 发起或更新 PR/MR，返回 mrUrl；Git SSH 仓库使用请求人的 SSH 密钥推送，返回 sourceBranch 和 commit。调用前先跑通相关测试。title 写改动标题；description 用 Markdown 概括整个交付的改动和验证结果。targetBranch 默认是工作分支的起点 baseBranch；不同则会给出 warning。只读仓库不会提交，手工切换到其它分支时会拒绝提交。默认 mode=mr；用户明确要合并到 preview/test 等已有共享分支时传 mode=direct 和 targetBranch，直接推送合并结果（目标不能是基线分支）。",
+		Description: "提交并推送当前工作区的工作分支。GitHub / 工蜂使用请求人的 Git Token、CNB 使用请求人的 CNB 令牌发起或更新 PR/MR，返回 mrUrl；Git SSH 仓库使用请求人的 SSH 密钥推送，返回 sourceBranch 和 commit。调用前先跑通相关测试。title 写改动标题；description 用 Markdown 概括整个交付的改动和验证结果。targetBranch 默认是工作分支的起点 baseBranch；不同则会给出 warning。只读仓库不会提交，手工切换到其它分支时会拒绝提交。默认 mode=mr；用户明确要合并到 preview/test 等已有共享分支时传 mode=direct 和 targetBranch，直接推送合并结果（目标不能是基线分支）。",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"title":{"type":"string","minLength":1,"maxLength":200},"description":{"type":"string","maxLength":20000},"targetBranch":{"type":"string","maxLength":200,"description":"PR/MR 的目标分支，默认是工作区打开时的 baseBranch；与起点不同时结果带 warning。mode=direct 时必填，写要直推的共享分支"},"mode":{"type":"string","enum":["mr","direct"],"description":"mr（默认）推工作分支并发起或更新 PR/MR；direct 把工作分支 merge --no-ff 进 targetBranch 后直推，不发 MR"}},"required":["title"],"additionalProperties":false}`),
 		Kind:        "workspace",
 	}
@@ -127,7 +128,14 @@ func (h *agentToolGateway) workspaceSubmitMR(ctx context.Context, s *AgentToolSe
 	}
 	gitToken := strings.TrimSpace(h.repo.GitCredential(ctx, s.User.ID))
 	_, apiToken := gitwork.SplitToken(gitToken)
-	if apiToken == "" && !slices.ContainsFunc(run.RepositoryContexts(), func(rc domain.RepositoryContext) bool { return rc.Provider == domain.RepositoryProviderSSH }) {
+	if requester.CNBToken == "" && slices.ContainsFunc(run.RepositoryContexts(), func(rc domain.RepositoryContext) bool {
+		return rc.Provider == domain.RepositoryProviderCNB && !rc.ReadOnly
+	}) {
+		return "", fmt.Errorf("你还没有配置 CNB 访问令牌，无法推送和发起 PR。请到「个人配置」填写 CNB 令牌：打开 https://cnb.cool/profile/token 生成，授予 repo-code:rw 与 repo-pr:rw 权限，复制后粘贴并点校验")
+	}
+	if apiToken == "" && !slices.ContainsFunc(run.RepositoryContexts(), func(rc domain.RepositoryContext) bool {
+		return rc.Provider == domain.RepositoryProviderSSH || rc.Provider == domain.RepositoryProviderCNB
+	}) {
 		return "", fmt.Errorf("你还没有配置 Git Token，无法推送和发起 PR。请到「个人配置 → 个人凭证」配置：打开 https://github.com/settings/tokens 新建令牌，为目标仓库授予 Contents 和 Pull requests 的读写权限，复制后粘贴并点校验")
 	}
 	if h.engine == nil {
@@ -195,6 +203,27 @@ func (h *agentToolGateway) workspaceSubmitMR(ctx context.Context, s *AgentToolSe
 		}
 		if rc.Provider == domain.RepositoryProviderSSH {
 			result.PushOnly, result.RepositoryURL = true, rc.WebURL
+			results = append(results, result)
+			continue
+		}
+		if rc.Provider == domain.RepositoryProviderCNB {
+			slug := cnbRepoSlug(rc)
+			if slug == "" {
+				result.Error = "CNB 仓库标识无效，请到代码平台手动发起 PR"
+				results = append(results, result)
+				continue
+			}
+			result.CreateURL = fmt.Sprintf("https://cnb.cool/%s/-/compare/%s...%s", slug, url.PathEscape(result.TargetBranch), url.PathEscape(result.SourceBranch))
+			pr, err := submitCNBPull(ctx, requester.CNBToken, slug, result.SourceBranch, result.TargetBranch, title, body)
+			if err != nil {
+				result.Error = redactAgentToolResult(err.Error(), requester)
+			} else {
+				result.MRIID, result.Existing, result.Updated = pr.IID, pr.Existing, pr.Updated
+				if pr.UpdateError != "" {
+					result.UpdateError = redactAgentToolResult(pr.UpdateError, requester)
+				}
+				result.MRURL = domain.GongfengMRURL("cnb:"+slug, int(pr.IID))
+			}
 			results = append(results, result)
 			continue
 		}
@@ -338,6 +367,58 @@ func hostedRepoPath(rc domain.RepositoryContext, host string, valid *regexp.Rege
 		}
 	}
 	return ""
+}
+
+// cnbRepoSlug is the "group/.../repo" of a CNB repository, or "" when the
+// stored identity is not a valid CNB path, so the token only addresses cnb.cool.
+func cnbRepoSlug(rc domain.RepositoryContext) string {
+	info, ok := domain.ParseRepositoryURL(strings.TrimSpace(rc.GongfengProjectID))
+	if !ok || !strings.HasPrefix(info.Project, "cnb:") {
+		return ""
+	}
+	return strings.TrimPrefix(info.Project, "cnb:")
+}
+
+// submitCNBPull opens a pull request, or when the branch already has an open
+// one brings its title and body up to this submission.
+func submitCNBPull(ctx context.Context, token, slug, source, target, title, description string) (gongfengMR, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	client := newCNBClient(token)
+	existing, found, err := client.FindPull(ctx, slug, source, target)
+	if err != nil {
+		return gongfengMR{}, cnbPullError(err)
+	}
+	if !found || existing.State != "open" {
+		created, err := client.CreatePull(ctx, slug, source, target, title, description)
+		if err != nil {
+			return gongfengMR{}, cnbPullError(err)
+		}
+		return gongfengMR{IID: int64(created.Number)}, nil
+	}
+	result := gongfengMR{IID: int64(existing.Number), Existing: true}
+	if _, err := client.UpdatePull(ctx, slug, existing.Number, title, description); err != nil {
+		result.UpdateError = "更新 PR 标题和描述失败：" + cnbPullError(err).Error()
+	} else {
+		result.Updated = true
+	}
+	return result, nil
+}
+
+func cnbPullError(err error) error {
+	var apiErr *cnb.APIError
+	if !errors.As(err, &apiErr) {
+		return fmt.Errorf("无法连接 CNB：%v", err)
+	}
+	switch apiErr.Status {
+	case http.StatusUnauthorized:
+		return fmt.Errorf("CNB 访问令牌无效或已过期（HTTP 401）：请到「个人配置」重新生成并保存")
+	case http.StatusForbidden:
+		return fmt.Errorf("CNB 拒绝发起 PR（HTTP 403）：令牌需要 repo-code:rw 与 repo-pr:rw，且你对该仓库需要开发者及以上权限。%s", apiErr.Message)
+	case http.StatusNotFound:
+		return fmt.Errorf("CNB 找不到仓库或分支（HTTP 404）：%s", apiErr.Message)
+	}
+	return fmt.Errorf("CNB 发起 PR 失败：%v", apiErr)
 }
 
 // createGitHubPR opens a pull request. When the branches already have an open

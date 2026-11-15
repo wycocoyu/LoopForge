@@ -94,6 +94,10 @@ Cloning a repository and building a custom sandbox image report progress while t
 
 A clone that is stopped this way is not retried, since a retry would wait on the same network. When the execution host reaches GitHub or Debian mirrors slowly, point git at a proxy (`git config --global http.proxy`) and use a nearby package mirror in the Dockerfile rather than raising these limits.
 
+### CNB repositories (cnb.cool)
+
+Bind a CNB repository with its web or clone address, for example `https://cnb.cool/group/subgroup/repo`; any number of group levels is accepted. Each user saves a personal CNB access token under **Personal settings** (generate it at `https://cnb.cool/profile/token` with `repo-code:rw` and `repo-pr:rw`). The token is sent only to `cnb.cool` and `api.cnb.cool`: git commands carry a cnb.cool-scoped credential helper that answers with the token, or refuses when none is configured, so the global Git token is never offered to CNB. SOP checkouts and pushes use the run's responsible user, conversation pushes and `workbench_workspace_submit_mr` use the requesting user, and delivery pull requests and background merge status use the project owner. Upgrade execution machines to Runner **0.10.2** or later; the platform refuses to dispatch CNB repositories to older ones and withholds Git tokens from an old runner that claims such a task. Apply `migrations/033_cnb_credentials.sql` manually (startup AutoMigrate also adds the column).
+
 ### Git repositories over SSH
 
 Use Git SSH for GitLab.com, self-managed GitLab, Gitea, Gogs, GitHub, and other Git hosts that offer this transport. In **Project settings → Code repositories** or **Quick access**, enter the clone address, such as `git@gitlab.com:group/repo.git` or `ssh://git@git.example.org:2222/group/repo.git`, and select the existing default branch. GitHub HTTPS continues to use GitHub authorization or a PAT.
